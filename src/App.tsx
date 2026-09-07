@@ -1,4 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import Auth from './Auth'
+import { supabase } from './supabase'
 import {
   Bell,
   Compass,
@@ -37,6 +39,38 @@ const navItems = [
 ]
 
 function App() {
+    const [session, setSession] = useState<{
+    user: {
+      id: string
+      email?: string
+    }
+  } | null>(null)
+
+  const [authLoading, setAuthLoading] = useState(true)
+  const [showAuth, setShowAuth] = useState(false)
+
+  useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false)
+      return
+    }
+
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session)
+      setAuthLoading(false)
+    })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession)
+      setAuthLoading(false)
+    })
+
+    return () => {
+      subscription.unsubscribe()
+    }
+  }, [])
   const [activeNav, setActiveNav] = useState('Home')
   const [showCreate, setShowCreate] = useState(false)
   const [showRoom, setShowRoom] = useState(false)
@@ -45,6 +79,20 @@ function App() {
   const visibleActivities = activities.filter((activity) =>
     `${activity.name} ${activity.title}`.toLowerCase().includes(search.toLowerCase()),
   )
+  if (authLoading) {
+    return (
+      <div className="auth-loading">
+        <span className="brand-mark">
+          <Play size={16} fill="currentColor" />
+        </span>
+        <span>Loading WatchSync...</span>
+      </div>
+    )
+  }
+
+  if (!session || showAuth) {
+    return <Auth onBack={() => setShowAuth(false)} />
+  }
 
   if (showRoom) return <WatchRoom onLeave={() => setShowRoom(false)} />
 
@@ -57,7 +105,10 @@ function App() {
         </nav>
         <div className="sidebar-bottom">
           <button className="nav-item" onClick={() => setActiveNav('Notifications')}><Bell size={19} /><span>Notifications</span><span className="notification-dot" /></button>
-          <button className="profile-mini" onClick={() => setActiveNav('Profile')}><span className="avatar avatar-self">TO</span><span className="profile-copy"><strong>Tosiano</strong><small>View profile</small></span></button>
+          <div className="profile-area">
+            <button className="profile-mini" onClick={() => setActiveNav('Profile')}><span className="avatar avatar-self">TO</span><span className="profile-copy"><strong>{session.user.email?.split('@')[0] || 'You'}</strong><small>View profile</small></span></button>
+            <button className="logout-button" onClick={async () => { if (supabase) { await supabase.auth.signOut() } }}>Log out</button>
+          </div>
         </div>
       </aside>
 
