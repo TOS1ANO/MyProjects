@@ -22,7 +22,18 @@ export type SyncTransport = {
 
 export async function createSyncTransport(sessionId: string): Promise<SyncTransport> {
   if (supabase) {
-    const channel = supabase.channel(`watchsync:${sessionId}`)
+    const channel = supabase.channel(`watchsync:${sessionId}`, {
+      config: {
+        broadcast: { self: false },
+      },
+    })
+
+    let onPlayback: ((state: PlaybackState) => void) | null = null
+
+    channel.on('broadcast', { event: 'playback' }, ({ payload }) => {
+      const message = payload as SyncMessage
+      if (message.type === 'playback') onPlayback?.(message.state)
+    })
 
     await channel.subscribe()
 
@@ -36,11 +47,10 @@ export async function createSyncTransport(sessionId: string): Promise<SyncTransp
         })
       },
       subscribe: (onMessage) => {
-        channel.on('broadcast', { event: 'playback' }, ({ payload }) => {
-          const message = payload as SyncMessage
-          if (message.type === 'playback') onMessage(message.state)
-        })
-        return () => undefined
+        onPlayback = onMessage
+        return () => {
+          onPlayback = null
+        }
       },
       close: async () => {
         await supabase.removeChannel(channel)
@@ -66,10 +76,17 @@ export async function createSyncTransport(sessionId: string): Promise<SyncTransp
 
 export function getAuthoritativePosition(state: PlaybackState, now = Date.now()) {
   if (!state.isPlaying) return state.position
-  const elapsed = Math.max(0, (now - state.updatedAt) / 1000)
-  return state.position + elapsed * state.playbackRate
+  return state.position + Math.max(0, (now - state.updatedAt) / 1000) * state.playbackRate
+}
+
+export function getDrift(localPosition: number, state: PlaybackState, now = Date.now()) {
+  return getAuthoritativePosition(state, now) - localPosition
 }
 
 export function shouldHardSeek(driftSeconds: number) {
-  return Math.abs(driftSeconds) >= 1.25
+  return Math.abs(driftSeconds) >= 1
+}
+
+export function shouldCorrectDrift(driftSeconds: number) {
+  return Math.abs(driftSeconds) >= 0.15
 }
