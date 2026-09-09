@@ -37,6 +37,7 @@ const hostUserIdRef = useRef<string | null>(null)
 const currentUserIdRef = useRef<string | null>(null)
 const currentUserNameRef = useRef('You')
 const currentPresenceKeyRef = useRef<string | null>(null)
+const hasLeftRef = useRef(false)
 const [state, setState] = useState(initialState)
 const [duration, setDuration] = useState(0)
 const [transportMode, setTransportMode] = useState<'supabase' | 'browser'>('browser')
@@ -46,6 +47,36 @@ const [copied, setCopied] = useState(false)
 const [isHost, setIsHost] = useState(false)
 const [participants, setParticipants] = useState<Participant[]>([])
 const [reactions, setReactions] = useState(initialReactions)
+
+const markParticipantInactive = useCallback(async () => {
+if (!supabase || !sessionId || !currentUserIdRef.current || hasLeftRef.current) return
+
+hasLeftRef.current = true
+
+const { error } = await supabase
+  .from('participants')
+  .update({
+    is_active: false,
+    left_at: new Date().toISOString(),
+  })
+  .eq('session_id', sessionId)
+  .eq('user_id', currentUserIdRef.current)
+
+if (error) console.error('Could not mark participant inactive:', error)
+}, [sessionId])
+
+useEffect(() => {
+hasLeftRef.current = false
+
+return () => {
+  void markParticipantInactive()
+}
+}, [sessionId, markParticipantInactive])
+
+const leaveRoom = useCallback(async () => {
+await markParticipantInactive()
+onLeave()
+}, [markParticipantInactive, onLeave])
 
 const createReaction = useCallback((id: number, userId: string, reaction: string): Reaction => ({
 id,
@@ -664,5 +695,5 @@ window.setTimeout(() => setCopied(false), 1600)
 
 const displayedTime = state.isPlaying ? getAuthoritativePosition(state) : state.position
 
-return <div className="watch-room"> <header className="room-header"><button className="room-back" onClick={onLeave}><ArrowLeft size={18} /> <span>Leave room</span></button><div className="room-title"><span className="live-dot" /><strong>Interstellar — WatchSync Demo</strong><small>{transportMode === 'supabase' ? 'Realtime connected' : 'Local two-tab sync'}</small></div><button className="invite-button" onClick={() => void copyInvite()}><Copy size={16} /> {copied ? 'Copied' : inviteCode || 'Invite'}</button></header> <div className="room-layout"><section className="player-column"><div className="video-shell"><video ref={videoRef} src={DEMO_VIDEO} playsInline preload="metadata" onLoadedMetadata={() => setDuration(videoRef.current?.duration || 0)} onPlay={() => syncFromVideo(true, true)} onPause={() => syncFromVideo(false, true)} onRateChange={() => syncFromVideo(stateRef.current.isPlaying, true)} onSeeked={() => syncFromVideo(stateRef.current.isPlaying)} controls={false} /><div className="video-badge"><span className="live-dot" /> SYNCED</div><div className="video-time">{formatTime(displayedTime)}</div></div><div className="player-controls"><button className="play-control" onClick={() => state.isPlaying ? handlePause() : void handlePlay()} disabled={!isHost}>{state.isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}</button><input className="seekbar" type="range" min="0" max={duration || 1} step="0.1" value={Math.min(displayedTime, duration || 1)} onChange={(event) => handleSeek(Number(event.target.value))} disabled={!isHost} /><span className="time-label">{formatTime(displayedTime)} / {formatTime(duration)}</span></div><div className="reaction-bar"><span>React</span>{REACTIONS.map((reaction) => <button key={reaction} onClick={() => void sendReaction(reaction)} aria-label={`Send ${reaction}`}>{reaction}</button>)}</div><div className="floating-reactions">{reactions.map((item) => <span className="floating-reaction" key={item.id} style={{ left: `${item.left}%`, fontSize: `${item.size}px`, animationDuration: `${item.duration}s`, animationDelay: `${item.delay}s`, '--reaction-rotation': `${item.rotation}deg` } as CSSProperties}>{item.reaction}</span>)}</div><div className="room-status"><div><span className="status-pulse" /> {isHost ? 'You control playback' : 'Host controls playback'}</div><span>{participants.length} {participants.length === 1 ? 'person' : 'people'} watching</span></div></section><aside className="room-side"><div className="participants-panel"><div className="panel-heading"><strong><Users size={17} /> Watching now</strong><span>{participants.length}</span></div>{participants.map((participant) => <div className="participant" key={participant.id}><span className="avatar">{participant.avatar}</span><div><strong>{participant.id === currentPresenceKeyRef.current ? 'You' : participant.name}</strong><small>{participant.isHost ? 'Host' : participant.status}</small></div><i /></div>)}</div><div className="chat-panel"><div className="panel-heading"><strong><MessageCircle size={17} /> Live chat</strong><span>{messages.length}</span></div><div className="messages">{messages.map((item) => <div className="message" key={item.id}><strong>{item.name}</strong><span>{item.text}</span></div>)}</div><form className="chat-form" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}><input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Say something..." /><button aria-label="Send" type="submit"><Send size={16} /></button></form></div></aside></div><button className="room-close" onClick={onLeave}><X size={16} /> Close WatchSync</button></div>
+return <div className="watch-room"> <header className="room-header"><button className="room-back" onClick={() => void leaveRoom()}><ArrowLeft size={18} /> <span>Leave room</span></button><div className="room-title"><span className="live-dot" /><strong>Interstellar — WatchSync Demo</strong><small>{transportMode === 'supabase' ? 'Realtime connected' : 'Local two-tab sync'}</small></div><button className="invite-button" onClick={() => void copyInvite()}><Copy size={16} /> {copied ? 'Copied' : inviteCode || 'Invite'}</button></header> <div className="room-layout"><section className="player-column"><div className="video-shell"><video ref={videoRef} src={DEMO_VIDEO} playsInline preload="metadata" onLoadedMetadata={() => setDuration(videoRef.current?.duration || 0)} onPlay={() => syncFromVideo(true, true)} onPause={() => syncFromVideo(false, true)} onRateChange={() => syncFromVideo(stateRef.current.isPlaying, true)} onSeeked={() => syncFromVideo(stateRef.current.isPlaying)} controls={false} /><div className="video-badge"><span className="live-dot" /> SYNCED</div><div className="video-time">{formatTime(displayedTime)}</div></div><div className="player-controls"><button className="play-control" onClick={() => state.isPlaying ? handlePause() : void handlePlay()} disabled={!isHost}>{state.isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}</button><input className="seekbar" type="range" min="0" max={duration || 1} step="0.1" value={Math.min(displayedTime, duration || 1)} onChange={(event) => handleSeek(Number(event.target.value))} disabled={!isHost} /><span className="time-label">{formatTime(displayedTime)} / {formatTime(duration)}</span></div><div className="reaction-bar"><span>React</span>{REACTIONS.map((reaction) => <button key={reaction} onClick={() => void sendReaction(reaction)} aria-label={`Send ${reaction}`}>{reaction}</button>)}</div><div className="floating-reactions">{reactions.map((item) => <span className="floating-reaction" key={item.id} style={{ left: `${item.left}%`, fontSize: `${item.size}px`, animationDuration: `${item.duration}s`, animationDelay: `${item.delay}s`, '--reaction-rotation': `${item.rotation}deg` } as CSSProperties}>{item.reaction}</span>)}</div><div className="room-status"><div><span className="status-pulse" /> {isHost ? 'You control playback' : 'Host controls playback'}</div><span>{participants.length} {participants.length === 1 ? 'person' : 'people'} watching</span></div></section><aside className="room-side"><div className="participants-panel"><div className="panel-heading"><strong><Users size={17} /> Watching now</strong><span>{participants.length}</span></div>{participants.map((participant) => <div className="participant" key={participant.id}><span className="avatar">{participant.avatar}</span><div><strong>{participant.id === currentPresenceKeyRef.current ? 'You' : participant.name}</strong><small>{participant.isHost ? 'Host' : participant.status}</small></div><i /></div>)}</div><div className="chat-panel"><div className="panel-heading"><strong><MessageCircle size={17} /> Live chat</strong><span>{messages.length}</span></div><div className="messages">{messages.map((item) => <div className="message" key={item.id}><strong>{item.name}</strong><span>{item.text}</span></div>)}</div><form className="chat-form" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}><input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Say something..." /><button aria-label="Send" type="submit"><Send size={16} /></button></form></div></aside></div><button className="room-close" onClick={() => void leaveRoom()}><X size={16} /> Close WatchSync</button></div>
 }

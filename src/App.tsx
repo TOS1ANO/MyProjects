@@ -37,12 +37,6 @@ const formatPlaybackTime = (seconds: number) => {
     : `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
 }
 
-type ActivityViewer = {
-  id: string
-  avatar: string
-  avatarUrl: string
-}
-
 type Activity = {
   id: string
   name: string
@@ -55,7 +49,19 @@ type Activity = {
   sessionId: string
   inviteCode: string
   isOwn: boolean
-  viewerAvatars: ActivityViewer[]
+}
+
+type DiscoverSession = {
+  id: string
+  hostId: string
+  hostName: string
+  hostUsername: string
+  hostAvatar: string
+  title: string
+  image: string
+  inviteCode: string
+  isOwn: boolean
+  viewerCount: number
 }
 
 type Friend = {
@@ -136,6 +142,10 @@ function App() {
   const [activitiesLoading, setActivitiesLoading] = useState(false)
   const [activitiesError, setActivitiesError] = useState('')
 
+  const [discoverSessions, setDiscoverSessions] = useState<DiscoverSession[]>([])
+  const [discoverLoading, setDiscoverLoading] = useState(false)
+  const [discoverError, setDiscoverError] = useState('')
+
   const visibleActivities = activities.filter((activity) =>
     `${activity.name} ${activity.title}`
       .toLowerCase()
@@ -144,6 +154,12 @@ function App() {
 
   const visibleFriends = friends.filter((friend) =>
     `${friend.displayName} ${friend.username} ${friend.bio}`
+      .toLowerCase()
+      .includes(search.toLowerCase()),
+  )
+
+  const visibleDiscoverSessions = discoverSessions.filter((watchSession) =>
+    `${watchSession.hostName} ${watchSession.hostUsername} ${watchSession.title}`
       .toLowerCase()
       .includes(search.toLowerCase()),
   )
@@ -194,6 +210,7 @@ function App() {
       return
     }
 
+    // Keep only the newest live session for each person.
     const latestSessionsByHost = new Map<
       string,
       (typeof sessionsData)[number]
@@ -206,6 +223,7 @@ function App() {
     }
 
     const uniqueSessions = Array.from(latestSessionsByHost.values())
+
     const sessionIds = uniqueSessions.map((item) => item.id)
 
     const profileIds = [
@@ -224,7 +242,7 @@ function App() {
 
       supabase
         .from('participants')
-        .select('session_id, user_id, is_active')
+        .select('session_id, is_active')
         .in('session_id', sessionIds)
         .eq('is_active', true),
 
@@ -255,21 +273,6 @@ function App() {
     const participants = participantsData || []
     const playbackStates = playbackData || []
 
-    const participantUserIds = [
-      ...new Set(participants.map((participant) => participant.user_id)),
-    ]
-
-    let viewerProfiles: typeof profiles = []
-
-    if (participantUserIds.length) {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, display_name, username, avatar_url')
-        .in('id', participantUserIds)
-
-      viewerProfiles = data || []
-    }
-
     const nextActivities: Activity[] = uniqueSessions.map(
       (watchSession, index) => {
         const profile = profiles.find(
@@ -291,47 +294,12 @@ function App() {
           position += elapsed * (playback.playback_rate || 1)
         }
 
-        const sessionParticipants = participants.filter(
-          (participant) =>
-            participant.session_id === watchSession.id,
-        )
-
-        const viewerProfilesForSession = sessionParticipants
-          .map((participant) =>
-            viewerProfiles.find(
-              (profileItem) =>
-                profileItem.id === participant.user_id,
-            ),
-          )
-          .filter(Boolean)
-
-        const viewerAvatars: ActivityViewer[] =
-          viewerProfilesForSession.slice(0, 4).map((viewer) => {
-            const displayName =
-              viewer?.display_name ||
-              viewer?.username ||
-              'Someone'
-
-            const initials = displayName
-              .split(' ')
-              .map((part) => part[0])
-              .join('')
-              .slice(0, 2)
-              .toUpperCase()
-
-            return {
-              id: viewer?.id || displayName,
-              avatar: initials,
-              avatarUrl: viewer?.avatar_url || '',
-            }
-          })
-
-        const viewerCount = sessionParticipants.length
+        const viewerCount = participants.filter(
+          (participant) => participant.session_id === watchSession.id,
+        ).length
 
         const displayName =
-          profile?.display_name ||
-          profile?.username ||
-          'Someone'
+          profile?.display_name || profile?.username || 'Someone'
 
         const initials = displayName
           .split(' ')
@@ -354,7 +322,6 @@ function App() {
           sessionId: watchSession.id,
           inviteCode: watchSession.invite_code || '',
           isOwn: watchSession.host_id === session.user.id,
-          viewerAvatars,
         }
       },
     )
@@ -367,6 +334,104 @@ function App() {
     if (!session?.user.id) return
     void loadActivities()
   }, [session?.user.id])
+
+  const loadDiscover = async () => {
+    if (!supabase || !session?.user.id) return
+
+    setDiscoverLoading(true)
+    setDiscoverError('')
+
+    const { data: sessionsData, error: sessionsError } = await supabase
+      .from('sessions')
+      .select('id, host_id, title, thumbnail_url, invite_code, status, created_at')
+      .eq('status', 'live')
+      .order('created_at', { ascending: false })
+      .limit(30)
+
+    if (sessionsError) {
+      console.error('Could not load Discover sessions:', sessionsError)
+      setDiscoverError('Could not load live sessions right now.')
+      setDiscoverLoading(false)
+      return
+    }
+
+    if (!sessionsData?.length) {
+      setDiscoverSessions([])
+      setDiscoverLoading(false)
+      return
+    }
+
+    const hostIds = [...new Set(sessionsData.map((watchSession) => watchSession.host_id))]
+
+    const { data: profilesData, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, display_name, username, avatar_url')
+      .in('id', hostIds)
+
+    if (profilesError) {
+      console.error('Could not load Discover profiles:', profilesError)
+    }
+
+    const profiles = profilesData || []
+    const latestSessionsByHost = new Map<string, (typeof sessionsData)[number]>()
+
+    for (const watchSession of sessionsData) {
+      if (!latestSessionsByHost.has(watchSession.host_id)) {
+        latestSessionsByHost.set(watchSession.host_id, watchSession)
+      }
+    }
+
+    const uniqueSessions = Array.from(latestSessionsByHost.values())
+    const sessionIds = uniqueSessions.map((watchSession) => watchSession.id)
+    const { data: viewerCountsData, error: viewerCountsError } = await supabase.rpc('get_live_session_viewer_counts', { session_ids: sessionIds })
+
+    if (viewerCountsError) {
+      console.error('Could not load Discover viewer counts:', viewerCountsError)
+    }
+
+    const viewerCounts = new Map(
+      (viewerCountsData || []).map((item) => [item.session_id, Number(item.viewer_count) || 0]),
+    )
+
+    const nextDiscoverSessions: DiscoverSession[] = uniqueSessions.map((watchSession, index) => {
+      const profile = profiles.find((item) => item.id === watchSession.host_id)
+      const hostName = profile?.display_name || profile?.username || 'Someone'
+      const hostUsername = profile?.username || ''
+      const initials = hostName
+        .split(' ')
+        .map((part) => part[0])
+        .join('')
+        .slice(0, 2)
+        .toUpperCase()
+
+      return {
+        id: watchSession.id,
+        hostId: watchSession.host_id,
+        hostName,
+        hostUsername,
+        hostAvatar: profile?.avatar_url || initials,
+        title: watchSession.title || 'WatchSync Session',
+        image: watchSession.thumbnail_url || fallbackImages[index % fallbackImages.length],
+        inviteCode: watchSession.invite_code || '',
+        isOwn: watchSession.host_id === session.user.id,
+        viewerCount: viewerCounts.get(watchSession.id) || 0,
+      }
+    })
+
+    setDiscoverSessions(nextDiscoverSessions)
+    setDiscoverLoading(false)
+  }
+
+  useEffect(() => {
+    if (activeNav !== 'Discover' || !session?.user.id) return
+    void loadDiscover()
+
+    const interval = window.setInterval(() => {
+      void loadDiscover()
+    }, 15000)
+
+    return () => window.clearInterval(interval)
+  }, [activeNav, session?.user.id])
 
   useEffect(() => {
     if (!session?.user.id) return
@@ -720,7 +785,59 @@ function App() {
           </button>
         </header>
 
-        {activeNav === 'Friends' ? (
+        {activeNav === 'Discover' ? (
+          <section className="discover-page">
+            <div className="discover-hero">
+              <div>
+                <span className="section-kicker">DISCOVER</span>
+                <h1>Find people to watch with.</h1>
+                <p>Explore live WatchSync sessions and jump into the action.</p>
+              </div>
+              <button className="ghost-button" onClick={() => void loadDiscover()}>Refresh <span>↻</span></button>
+            </div>
+
+            {discoverLoading ? (
+              <div className="friends-loading"><span>Finding live sessions...</span></div>
+            ) : discoverError ? (
+              <div className="join-error">{discoverError}</div>
+            ) : visibleDiscoverSessions.length ? (
+              <div className="activity-grid discover-grid">
+                {visibleDiscoverSessions.map((watchSession) => (
+                  <article className="activity-card discover-card" key={watchSession.id}>
+                    <div className="poster-wrap">
+                      <img src={watchSession.image} alt={watchSession.title} />
+                      <div className="poster-gradient" />
+                      <div className="live-label"><span className="live-dot" /> LIVE NOW</div>
+                      <div className="poster-bottom"><span>WatchSync</span><span>{watchSession.viewerCount} {watchSession.viewerCount === 1 ? 'person' : 'people'} watching</span></div>
+                    </div>
+                    <div className="activity-info">
+                      <span className="avatar">
+                        {watchSession.hostAvatar.startsWith('http') ? <img src={watchSession.hostAvatar} alt={watchSession.hostName} /> : watchSession.hostAvatar}
+                      </span>
+                      <div className="activity-copy">
+                        <strong>{watchSession.isOwn ? 'You' : watchSession.hostName}</strong>
+                        <span>{watchSession.isOwn ? 'are watching' : 'is watching'} <b>{watchSession.title}</b></span>
+                        {watchSession.hostUsername && <small>@{watchSession.hostUsername}</small>}
+                      </div>
+                      {watchSession.isOwn ? (
+                        <button className="ghost-button" onClick={() => { setSessionId(watchSession.id); setInviteCode(watchSession.inviteCode || null); setShowRoom(true) }}>Open</button>
+                      ) : (
+                        <button className="tune-button" onClick={() => void tuneIntoActivity({ id: watchSession.id, name: watchSession.hostName, title: watchSession.title, time: '0:00', image: watchSession.image, viewers: watchSession.viewerCount, avatar: '', avatarUrl: '', sessionId: watchSession.id, inviteCode: watchSession.inviteCode, isOwn: false })}>Tune In</button>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="friends-empty">
+                <span className="section-kicker">QUIET RIGHT NOW</span>
+                <h2>No live sessions yet.</h2>
+                <p>Start a WatchSync session and it will appear here for the community.</p>
+                <button className="primary-button" onClick={() => setShowCreate(true)}><Play size={16} fill="currentColor" /> Start Watching</button>
+              </div>
+            )}
+          </section>
+        ) : activeNav === 'Friends' ? (
           <section className="friends-page">
             <div className="section-heading">
               <div>
@@ -948,8 +1065,7 @@ function App() {
 
                         <div className="poster-bottom">
                           <span>{activity.time}</span>
-
-                          <span className="watching-count">
+                          <span>
                             {activity.viewers} watching
                           </span>
                         </div>
@@ -980,36 +1096,6 @@ function App() {
                               : 'is watching'}{' '}
                             <b>{activity.title}</b>
                           </span>
-
-                          <div className="activity-viewers">
-                            <div className="viewer-stack">
-                              {activity.viewerAvatars.map(
-                                (viewer) => (
-                                  <span
-                                    className="viewer-avatar"
-                                    key={viewer.id}
-                                  >
-                                    {viewer.avatarUrl ? (
-                                      <img
-                                        src={viewer.avatarUrl}
-                                        alt=""
-                                      />
-                                    ) : (
-                                      viewer.avatar
-                                    )}
-                                  </span>
-                                ),
-                              )}
-                            </div>
-
-                            {activity.viewers > 0 && (
-                              <small>
-                                {activity.viewers === 1
-                                  ? '1 person watching'
-                                  : `${activity.viewers} people watching`}
-                              </small>
-                            )}
-                          </div>
                         </div>
 
                         {activity.isOwn ? (
