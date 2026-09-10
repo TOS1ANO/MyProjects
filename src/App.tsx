@@ -137,6 +137,10 @@ function App() {
   const [friends, setFriends] = useState<Friend[]>([])
   const [friendsLoading, setFriendsLoading] = useState(false)
   const [friendsError, setFriendsError] = useState('')
+  const [selectedProfileData, setSelectedProfileData] = useState<Friend | null>(null)
+  const [selectedProfileActivity, setSelectedProfileActivity] = useState<Activity | null>(null)
+  const [profileLoading, setProfileLoading] = useState(false)
+  const [profileError, setProfileError] = useState('')
 
   const [activities, setActivities] = useState<Activity[]>([])
   const [activitiesLoading, setActivitiesLoading] = useState(false)
@@ -145,6 +149,21 @@ function App() {
   const [discoverSessions, setDiscoverSessions] = useState<DiscoverSession[]>([])
   const [discoverLoading, setDiscoverLoading] = useState(false)
   const [discoverError, setDiscoverError] = useState('')
+
+  type Notification = {
+    id: number
+    type: 'follow' | 'watching'
+    message: string
+    isRead: boolean
+    createdAt: string
+    actorName: string
+    actorUsername: string
+    actorAvatar: string
+  }
+
+  const [notifications, setNotifications] = useState<Notification[]>([])
+  const [notificationsLoading, setNotificationsLoading] = useState(false)
+  const [notificationsError, setNotificationsError] = useState('')
 
   const visibleActivities = activities.filter((activity) =>
     `${activity.name} ${activity.title}`
@@ -333,6 +352,190 @@ function App() {
   useEffect(() => {
     if (!session?.user.id) return
     void loadActivities()
+  }, [session?.user.id])
+
+  const formatNotificationTime = (value: string) => {
+    const seconds = Math.max(
+      0,
+      Math.floor((Date.now() - new Date(value).getTime()) / 1000),
+    )
+
+    if (seconds < 60) return 'just now'
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
+    if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`
+    return new Date(value).toLocaleDateString()
+  }
+
+  const loadNotifications = async () => {
+    if (!supabase || !session?.user.id) return
+
+    setNotificationsLoading(true)
+    setNotificationsError('')
+
+    const { data, error } = await supabase
+      .from('notifications')
+      .select('id, type, message, is_read, created_at, actor_id')
+      .eq('user_id', session.user.id)
+      .order('created_at', { ascending: false })
+      .limit(50)
+
+    if (error) {
+      console.error('Could not load notifications:', error)
+      setNotificationsError('Could not load notifications right now.')
+      setNotificationsLoading(false)
+      return
+    }
+
+    const actorIds = [
+      ...new Set(
+        (data || [])
+          .map((notification) => notification.actor_id)
+          .filter(Boolean),
+      ),
+    ]
+
+    let profiles: {
+      id: string
+      display_name: string
+      username: string
+      avatar_url: string | null
+    }[] = []
+
+    if (actorIds.length) {
+      const { data: profilesData, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, display_name, username, avatar_url')
+        .in('id', actorIds)
+
+      if (profilesError) {
+        console.error('Could not load notification profiles:', profilesError)
+      } else {
+        profiles = profilesData || []
+      }
+    }
+
+    const nextNotifications: Notification[] = (data || []).map(
+      (notification) => {
+        const actor = profiles.find(
+          (profile) => profile.id === notification.actor_id,
+        )
+        const actorName =
+          actor?.display_name || actor?.username || 'Someone'
+        const actorUsername = actor?.username || ''
+        const actorAvatar =
+          actor?.avatar_url ||
+          actorName
+            .split(' ')
+            .map((part) => part[0])
+            .join('')
+            .slice(0, 2)
+            .toUpperCase()
+
+        return {
+          id: notification.id,
+          type: notification.type,
+          message: notification.message,
+          isRead: notification.is_read,
+          createdAt: notification.created_at,
+          actorName,
+          actorUsername,
+          actorAvatar,
+        }
+      },
+    )
+
+    setNotifications(nextNotifications)
+    setNotificationsLoading(false)
+  }
+
+  const markNotificationRead = async (notificationId: number) => {
+    if (!supabase || !session?.user.id) return
+
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('id', notificationId)
+      .eq('user_id', session.user.id)
+
+    if (error) {
+      console.error('Could not mark notification as read:', error)
+      return
+    }
+
+    setNotifications((current) =>
+      current.map((notification) =>
+        notification.id === notificationId
+          ? { ...notification, isRead: true }
+          : notification,
+      ),
+    )
+  }
+
+  const markAllNotificationsRead = async () => {
+    if (!supabase || !session?.user.id) return
+
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('user_id', session.user.id)
+      .eq('is_read', false)
+
+    if (error) {
+      console.error('Could not mark notifications as read:', error)
+      return
+    }
+
+    setNotifications((current) =>
+      current.map((notification) => ({
+        ...notification,
+        isRead: true,
+      })),
+    )
+  }
+
+  useEffect(() => {
+    if (!session?.user.id) return
+    void loadNotifications()
+  }, [session?.user.id])
+
+  useEffect(() => {
+    if (
+      activeNav !== 'Notifications' ||
+      !session?.user.id
+    ) return
+
+    void loadNotifications()
+
+    const interval = window.setInterval(() => {
+      void loadNotifications()
+    }, 15000)
+
+    return () => window.clearInterval(interval)
+  }, [activeNav, session?.user.id])
+
+  useEffect(() => {
+    if (!supabase || !session?.user.id) return
+
+    const channel = supabase
+      .channel(`notifications:${session.user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'notifications',
+          filter: `user_id=eq.${session.user.id}`,
+        },
+        () => {
+          void loadNotifications()
+        },
+      )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
   }, [session?.user.id])
 
   const loadDiscover = async () => {
@@ -525,46 +728,20 @@ function App() {
   }, [activeNav, session?.user.id])
 
   const toggleFollow = async (
-    friendId: string,
-    currentlyFollowing: boolean,
-  ) => {
-    if (!supabase || !session?.user.id) return
+  friendId: string,
+  currentlyFollowing: boolean,
+) => {
+  if (!supabase || !session?.user.id) return
 
-    if (currentlyFollowing) {
-      const { error } = await supabase
-        .from('follows')
-        .delete()
-        .eq('follower_id', session.user.id)
-        .eq('following_id', friendId)
-
-      if (error) {
-        console.error('Could not unfollow user:', error)
-        return
-      }
-
-      setFriends((current) =>
-        current.map((friend) =>
-          friend.id === friendId
-            ? {
-                ...friend,
-                isFollowing: false,
-                followers: Math.max(0, friend.followers - 1),
-              }
-            : friend,
-        ),
-      )
-
-      void loadActivities()
-      return
-    }
-
-    const { error } = await supabase.from('follows').insert({
-      follower_id: session.user.id,
-      following_id: friendId,
-    })
+  if (currentlyFollowing) {
+    const { error } = await supabase
+      .from('follows')
+      .delete()
+      .eq('follower_id', session.user.id)
+      .eq('following_id', friendId)
 
     if (error) {
-      console.error('Could not follow user:', error)
+      console.error('Could not unfollow user:', error)
       return
     }
 
@@ -573,14 +750,129 @@ function App() {
         friend.id === friendId
           ? {
               ...friend,
-              isFollowing: true,
-              followers: friend.followers + 1,
+              isFollowing: false,
+              followers: Math.max(0, friend.followers - 1),
             }
           : friend,
       ),
     )
 
     void loadActivities()
+    return
+  }
+
+  const { error } = await supabase.from('follows').insert({
+    follower_id: session.user.id,
+    following_id: friendId,
+  })
+
+  if (error) {
+    console.error('Could not follow user:', error)
+    return
+  }
+
+  await supabase.from('notifications').insert({
+    user_id: friendId,
+    actor_id: session.user.id,
+    type: 'follow',
+    message: 'started following you',
+  })
+
+  setFriends((current) =>
+    current.map((friend) =>
+      friend.id === friendId
+        ? {
+            ...friend,
+            isFollowing: true,
+            followers: friend.followers + 1,
+          }
+        : friend,
+    ),
+  )
+
+  void loadActivities()
+}
+
+  const loadProfile = async (profileId: string) => {
+    if (!supabase || !session?.user.id) return
+
+    setProfileLoading(true)
+    setProfileError('')
+
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('id, username, display_name, avatar_url, bio')
+      .eq('id', profileId)
+      .maybeSingle()
+
+    if (profileError || !profile) {
+      console.error('Could not load profile:', profileError)
+      setProfileError('Could not load this profile right now.')
+      setSelectedProfileData(null)
+      setSelectedProfileActivity(null)
+      setProfileLoading(false)
+      return
+    }
+
+    const [{ data: followingData }, { data: followerData }, { data: followingCountData }, { data: liveSessionData }] = await Promise.all([
+      supabase.from('follows').select('id').eq('follower_id', session.user.id).eq('following_id', profileId),
+      supabase.from('follows').select('id').eq('following_id', profileId),
+      supabase.from('follows').select('id').eq('follower_id', profileId),
+      supabase.from('sessions').select('id, title, thumbnail_url, invite_code').eq('host_id', profileId).eq('status', 'live').order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    ])
+
+    const nextProfile: Friend = {
+      id: profile.id,
+      username: profile.username,
+      displayName: profile.display_name,
+      avatar: profile.avatar_url || '',
+      bio: profile.bio || '',
+      isFollowing: Boolean(followingData?.length),
+      followers: followerData?.length || 0,
+      following: followingCountData?.length || 0,
+    }
+
+    setSelectedProfileData(nextProfile)
+    setSelectedProfileActivity(null)
+
+    if (liveSessionData) {
+      const { data: playbackData } = await supabase
+        .from('playback_state')
+        .select('position, is_playing, playback_rate, updated_at')
+        .eq('session_id', liveSessionData.id)
+        .maybeSingle()
+
+      const { data: viewerCountData } = await supabase.rpc('get_live_session_viewer_counts', { session_ids: [liveSessionData.id] })
+      const viewerCount = Number(viewerCountData?.[0]?.viewer_count) || 0
+      const position = Number(playbackData?.position) || 0
+      const updatedAt = playbackData?.updated_at ? new Date(playbackData.updated_at).getTime() : Date.now()
+      const currentPosition = playbackData?.is_playing
+        ? position + Math.max(0, (Date.now() - updatedAt) / 1000) * (Number(playbackData.playback_rate) || 1)
+        : position
+      const initials = nextProfile.displayName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()
+
+      setSelectedProfileActivity({
+        id: liveSessionData.id,
+        name: nextProfile.displayName,
+        title: liveSessionData.title || 'WatchSync Session',
+        time: formatPlaybackTime(currentPosition),
+        image: liveSessionData.thumbnail_url || fallbackImages[0],
+        viewers: viewerCount,
+        avatar: initials,
+        avatarUrl: nextProfile.avatar,
+        sessionId: liveSessionData.id,
+        inviteCode: liveSessionData.invite_code || '',
+        isOwn: profileId === session.user.id,
+      })
+    }
+
+    setProfileLoading(false)
+  }
+
+  const openProfile = (profileId: string) => {
+    setActiveNav('Profile')
+    setSearch('')
+    void loadProfile(profileId)
   }
 
   const tuneIntoActivity = async (activity: Activity) => {
@@ -721,13 +1013,15 @@ function App() {
           >
             <Bell size={19} />
             <span>Notifications</span>
-            <span className="notification-dot" />
+            {notifications.some((notification) => !notification.isRead) && (
+              <span className="notification-dot" />
+            )}
           </button>
 
           <div className="profile-area">
             <button
               className="profile-mini"
-              onClick={() => setActiveNav('Profile')}
+              onClick={() => openProfile(session.user.id)}
             >
               <span className="avatar avatar-self">TO</span>
 
@@ -785,7 +1079,173 @@ function App() {
           </button>
         </header>
 
-        {activeNav === 'Discover' ? (
+        {activeNav === 'Notifications' ? (
+          <section className="friends-page">
+            <div className="section-heading">
+              <div>
+                <span className="section-kicker">ACTIVITY</span>
+                <h2>Notifications</h2>
+              </div>
+
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button
+                  className="text-button"
+                  onClick={() => void loadNotifications()}
+                >
+                  Refresh <span>↻</span>
+                </button>
+
+                {notifications.some((notification) => !notification.isRead) && (
+                  <button
+                    className="text-button"
+                    onClick={() => void markAllNotificationsRead()}
+                  >
+                    Mark all read
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {notificationsLoading ? (
+              <div className="friends-loading">
+                <span>Loading notifications...</span>
+              </div>
+            ) : notificationsError ? (
+              <div className="join-error">{notificationsError}</div>
+            ) : notifications.length ? (
+              <div className="activity-grid">
+                {notifications.map((notification) => (
+                  <article
+                    className="friends-card"
+                    key={notification.id}
+                    style={{
+                      opacity: notification.isRead ? 0.72 : 1,
+                      borderColor: notification.isRead
+                        ? undefined
+                        : 'rgba(255,255,255,0.16)',
+                    }}
+                  >
+                    <div className="activity-info">
+                      <span className="avatar">
+                        {notification.actorAvatar.startsWith('http') ? (
+                          <img
+                            src={notification.actorAvatar}
+                            alt={notification.actorName}
+                          />
+                        ) : (
+                          notification.actorAvatar
+                        )}
+                      </span>
+
+                      <div className="activity-copy">
+                        <strong>{notification.actorName}</strong>
+                        <span>
+                          {notification.message}
+                        </span>
+                        {notification.actorUsername && (
+                          <small>@{notification.actorUsername}</small>
+                        )}
+                        <small>
+                          {formatNotificationTime(notification.createdAt)}
+                        </small>
+                      </div>
+
+                      {!notification.isRead && (
+                        <button
+                          className="ghost-button"
+                          onClick={() =>
+                            void markNotificationRead(notification.id)
+                          }
+                        >
+                          Mark read
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="friends-empty">
+                <span className="section-kicker">ALL QUIET</span>
+                <h2>No notifications yet.</h2>
+                <p>
+                  When someone follows you or other social activity happens,
+                  you’ll see it here.
+                </p>
+              </div>
+            )}
+          </section>
+        ) : activeNav === 'Profile' && selectedProfileData ? (
+          <section className="friends-page">
+            <div className="section-heading">
+              <div>
+                <span className="section-kicker">PROFILE</span>
+                <h2>{selectedProfileData.displayName}</h2>
+              </div>
+              <button className="text-button" onClick={() => { setSelectedProfileData(null); setSelectedProfileActivity(null); setActiveNav('Friends') }}>← Back to friends</button>
+            </div>
+
+            {profileLoading ? (
+              <div className="friends-loading"><span>Loading profile...</span></div>
+            ) : profileError ? (
+              <div className="join-error">{profileError}</div>
+            ) : (
+              <>
+                <article className="friends-card">
+                  <div className="activity-info">
+                    <span className="avatar">
+                      {selectedProfileData.avatar ? <img src={selectedProfileData.avatar} alt={selectedProfileData.displayName} /> : selectedProfileData.displayName.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()}
+                    </span>
+                    <div className="activity-copy">
+                      <strong>{selectedProfileData.displayName}</strong>
+                      <span>@{selectedProfileData.username}</span>
+                      {selectedProfileData.bio && <span>{selectedProfileData.bio}</span>}
+                      <small>{selectedProfileData.followers} followers · {selectedProfileData.following} following</small>
+                    </div>
+                    {selectedProfileData.id !== session.user.id && (
+                      <button className={selectedProfileData.isFollowing ? 'ghost-button' : 'tune-button'} onClick={() => void toggleFollow(selectedProfileData.id, selectedProfileData.isFollowing)}>
+                        {selectedProfileData.isFollowing ? 'Following' : 'Follow'}
+                      </button>
+                    )}
+                  </div>
+                </article>
+
+                <div className="section-heading" style={{ marginTop: 34 }}>
+                  <div><span className="section-kicker">LIVE NOW</span><h2>{selectedProfileData.id === session.user.id ? 'Your current session' : 'Currently watching'}</h2></div>
+                </div>
+
+                {selectedProfileActivity ? (
+                  <article className="activity-card">
+                    <div className="poster-wrap">
+                      <img src={selectedProfileActivity.image} alt={selectedProfileActivity.title} />
+                      <div className="poster-gradient" />
+                      <div className="live-label"><span className="live-dot" /> LIVE NOW</div>
+                      <div className="poster-bottom"><span>{selectedProfileActivity.time}</span><span>{selectedProfileActivity.viewers} {selectedProfileActivity.viewers === 1 ? 'person' : 'people'} watching</span></div>
+                    </div>
+                    <div className="activity-info">
+                      <span className="avatar">{selectedProfileActivity.avatarUrl ? <img src={selectedProfileActivity.avatarUrl} alt={selectedProfileActivity.name} /> : selectedProfileActivity.avatar}</span>
+                      <div className="activity-copy">
+                        <strong>{selectedProfileActivity.title}</strong>
+                        <span>{selectedProfileActivity.name} is watching</span>
+                      </div>
+                      {selectedProfileActivity.isOwn ? (
+                        <button className="ghost-button" onClick={() => { setSessionId(selectedProfileActivity.sessionId); setInviteCode(selectedProfileActivity.inviteCode || null); setShowRoom(true) }}>Open</button>
+                      ) : (
+                        <button className="tune-button" onClick={() => void tuneIntoActivity(selectedProfileActivity)}>Tune In</button>
+                      )}
+                    </div>
+                  </article>
+                ) : (
+                  <div className="friends-empty">
+                    <span className="section-kicker">NOT WATCHING</span>
+                    <h2>No live session right now.</h2>
+                    <p>When this person starts watching, their live session will appear here.</p>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        ) : activeNav === 'Discover' ? (
           <section className="discover-page">
             <div className="discover-hero">
               <div>
@@ -865,6 +1325,10 @@ function App() {
                   <article
                     className="friends-card"
                     key={friend.id}
+                    onClick={() => openProfile(friend.id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') openProfile(friend.id) }}
                   >
                     <div className="activity-info">
                       <span className="avatar">
@@ -903,12 +1367,10 @@ function App() {
                             ? 'ghost-button'
                             : 'tune-button'
                         }
-                        onClick={() =>
-                          void toggleFollow(
-                            friend.id,
-                            friend.isFollowing,
-                          )
-                        }
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void toggleFollow(friend.id, friend.isFollowing)
+                        }}
                       >
                         {friend.isFollowing
                           ? 'Following'
@@ -1322,6 +1784,40 @@ function App() {
                     return
                   }
 
+                  const { data: followersData, error: followersError } =
+                    await supabase
+                      .from('follows')
+                      .select('follower_id')
+                      .eq('following_id', session.user.id)
+
+                  if (followersError) {
+                    console.error(
+                      'Could not load followers for notifications:',
+                      followersError,
+                    )
+                  } else if (followersData?.length) {
+                    const notificationsToCreate = followersData.map(
+                      ({ follower_id }) => ({
+                        user_id: follower_id,
+                        actor_id: session.user.id,
+                        type: 'watching' as const,
+                        session_id: data.id,
+                        message: 'started watching a WatchSync session',
+                      }),
+                    )
+
+                    const { error: notificationError } = await supabase
+                      .from('notifications')
+                      .insert(notificationsToCreate)
+
+                    if (notificationError) {
+                      console.error(
+                        'Could not create watching notifications:',
+                        notificationError,
+                      )
+                    }
+                  }
+
                   setSessionId(data.id)
                   setInviteCode(data.invite_code)
                   setShowCreate(false)
@@ -1428,7 +1924,7 @@ function App() {
               onClick={() =>
                 label === 'Create'
                   ? setShowCreate(true)
-                  : setActiveNav(label)
+                  : setActiveNav(label === 'Activity' ? 'Notifications' : label)
               }
             >
               <Icon size={19} />
