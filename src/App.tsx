@@ -15,6 +15,28 @@ import {
 } from 'lucide-react'
 import WatchRoom from './WatchRoom'
 
+const getYouTubeVideoId = (value: string) => {
+  const input = value.trim()
+  if (!input) return ''
+
+  if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input
+
+  try {
+    const url = new URL(input)
+    if (url.hostname === 'youtu.be') return url.pathname.slice(1).split('/')[0]
+    if (url.hostname.includes('youtube.com')) {
+      const id = url.searchParams.get('v')
+      if (id) return id
+      const parts = url.pathname.split('/').filter(Boolean)
+      if (parts[0] === 'embed' || parts[0] === 'shorts') return parts[1] || ''
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
 const generateInviteCode = () => {
   const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   let code = ''
@@ -124,6 +146,10 @@ function App() {
 
   const [activeNav, setActiveNav] = useState('Home')
   const [showCreate, setShowCreate] = useState(false)
+  const [createTitle, setCreateTitle] = useState('')
+  const [createSource, setCreateSource] = useState<'demo' | 'youtube'>('demo')
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [createPrivacy, setCreatePrivacy] = useState<'public' | 'friends' | 'invite'>('friends')
   const [showJoin, setShowJoin] = useState(false)
   const [showRoom, setShowRoom] = useState(false)
   const [search, setSearch] = useState('')
@@ -1692,19 +1718,30 @@ function App() {
 
               <label>
                 What are you watching?
-                <input placeholder="Movie, show or video title" />
+                <input
+                  value={createTitle}
+                  onChange={(event) => setCreateTitle(event.target.value)}
+                  placeholder="Movie, show or video title"
+                />
               </label>
 
               <div className="source-grid">
                 <button
-                  onClick={() => {
-                    setShowCreate(false)
-                    setShowRoom(true)
-                  }}
+                  className={createSource === 'demo' ? 'active' : ''}
+                  onClick={() => setCreateSource('demo')}
                 >
                   <Video size={20} />
                   <strong>Demo Videos</strong>
                   <small>Ready for the MVP</small>
+                </button>
+
+                <button
+                  className={createSource === 'youtube' ? 'active' : ''}
+                  onClick={() => setCreateSource('youtube')}
+                >
+                  <Play size={20} />
+                  <strong>YouTube</strong>
+                  <small>Available now</small>
                 </button>
 
                 <button disabled>
@@ -1712,21 +1749,30 @@ function App() {
                   <strong>Upload / Owned</strong>
                   <small>Coming next</small>
                 </button>
-
-                <button disabled>
-                  <Compass size={20} />
-                  <strong>Public Video</strong>
-                  <small>Provider adapters next</small>
-                </button>
               </div>
+
+              {createSource === 'youtube' && (
+                <label>
+                  YouTube video
+                  <input
+                    value={youtubeUrl}
+                    onChange={(event) => setYoutubeUrl(event.target.value)}
+                    placeholder="https://www.youtube.com/watch?v=..."
+                  />
+                  <small>Paste a YouTube URL or 11-character video ID.</small>
+                </label>
+              )}
 
               <label>
                 Privacy
-                <select defaultValue="friends">
+                <select
+                  value={createPrivacy}
+                  onChange={(event) =>
+                    setCreatePrivacy(event.target.value as 'public' | 'friends' | 'invite')
+                  }
+                >
                   <option value="public">Public</option>
-                  <option value="friends">
-                    Friends only
-                  </option>
+                  <option value="friends">Friends only</option>
                   <option value="invite">Invite only</option>
                 </select>
               </label>
@@ -1736,16 +1782,26 @@ function App() {
                 onClick={async () => {
                   if (!supabase || !session.user.id) return
 
+                  const videoId =
+                    createSource === 'youtube'
+                      ? getYouTubeVideoId(youtubeUrl)
+                      : 'demo'
+
+                  if (createSource === 'youtube' && !videoId) {
+                    console.error('Please enter a valid YouTube URL or video ID.')
+                    return
+                  }
+
                   const newInviteCode = generateInviteCode()
 
                   const { data, error } = await supabase
                     .from('sessions')
                     .insert({
                       host_id: session.user.id,
-                      title: 'WatchSync Session',
-                      video_source: 'demo',
-                      video_id: 'demo',
-                      privacy: 'friends',
+                      title: createTitle.trim() || 'WatchSync Session',
+                      video_source: createSource,
+                      video_id: videoId,
+                      privacy: createPrivacy,
                       status: 'live',
                       invite_code: newInviteCode,
                     })

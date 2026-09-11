@@ -3,6 +3,7 @@ import { ArrowLeft, Copy, MessageCircle, Pause, Play, Send, Users, X } from 'luc
 import { createSyncTransport, getAuthoritativePosition, shouldHardSeek, type PlaybackState, type SyncTransport } from './sync'
 import './watch-room.css'
 import { supabase } from './supabase'
+import { createYouTubeAdapter } from './providers/youtube'
 
 const DEMO_VIDEO = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4'
 const REACTIONS = ['❤️', '😂', '🔥', '😮', '👏']
@@ -24,6 +25,11 @@ type WatchRoomProps = {
 
 export default function WatchRoom({ sessionId, inviteCode, onLeave }: WatchRoomProps) {
 const videoRef = useRef<HTMLVideoElement>(null)
+const providerAdapterRef = useRef<ReturnType<typeof createYouTubeAdapter> | null>(null)
+const youtubeContainerRef = useRef<HTMLDivElement>(null)
+const providerSourceRef = useRef('demo')
+const providerVideoIdRef = useRef('demo')
+const pendingProviderStateRef = useRef<PlaybackState | null>(null)
 const transportRef = useRef<SyncTransport | null>(null)
 const presenceChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
 const chatChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null)
@@ -47,6 +53,9 @@ const [copied, setCopied] = useState(false)
 const [isHost, setIsHost] = useState(false)
 const [participants, setParticipants] = useState<Participant[]>([])
 const [reactions, setReactions] = useState(initialReactions)
+const [providerSource, setProviderSource] = useState('demo')
+const [providerVideoId, setProviderVideoId] = useState('demo')
+const [roomTitle, setRoomTitle] = useState('Interstellar — WatchSync Demo')
 
 const markParticipantInactive = useCallback(async () => {
 if (!supabase || !sessionId || !currentUserIdRef.current || hasLeftRef.current) return
@@ -131,7 +140,7 @@ void (async () => {
 
   const { data: sessionData, error: sessionError } = await supabase
     .from('sessions')
-    .select('host_id')
+    .select('host_id, video_source, video_id, title')
     .eq('id', sessionId)
     .maybeSingle()
 
@@ -142,6 +151,17 @@ void (async () => {
 
   const hostUserId = sessionData?.host_id || null
   const host = hostUserId === authData.user.id
+  const source = sessionData?.video_source || 'demo'
+  const videoId = sessionData?.video_id || 'demo'
+
+  providerSourceRef.current = source
+  providerVideoIdRef.current = videoId
+
+  if (active) {
+    setProviderSource(source)
+    setProviderVideoId(videoId)
+    setRoomTitle(sessionData?.title || (source === 'youtube' ? 'YouTube — WatchSync' : 'Interstellar — WatchSync Demo'))
+  }
 
   if (active) {
     isHostRef.current = host
@@ -166,7 +186,7 @@ void (async () => {
       isPlaying: savedState.is_playing,
       playbackRate: savedState.playback_rate,
       updatedAt: Date.now(),
-      source: DEMO_VIDEO,
+      source: providerSourceRef.current === 'youtube' ? `youtube:${providerVideoIdRef.current}` : DEMO_VIDEO,
     }
 
     stateRef.current = loaded
@@ -188,7 +208,7 @@ void (async () => {
       isPlaying: false,
       playbackRate: 1,
       updatedAt: Date.now(),
-      source: DEMO_VIDEO,
+      source: providerSourceRef.current === 'youtube' ? `youtube:${providerVideoIdRef.current}` : DEMO_VIDEO,
     }
 
     stateRef.current = initial
@@ -474,8 +494,26 @@ void persistState(next, force)
 }, [persistState])
 
 const syncFromVideo = useCallback((isPlaying: boolean, force = false) => {
+if (applyingRemoteRef.current || !isHostRef.current) return
+
+if (providerSourceRef.current === 'youtube') {
+  const adapter = providerAdapterRef.current
+  if (!adapter) return
+
+  void adapter.getState().then((current) => {
+    broadcast({
+      position: current.position,
+      isPlaying,
+      playbackRate: current.playbackRate,
+      updatedAt: Date.now(),
+      source: `youtube:${providerVideoIdRef.current}`,
+    }, force)
+  }).catch((error) => console.error('Could not read YouTube playback state:', error))
+  return
+}
+
 const video = videoRef.current
-if (!video || applyingRemoteRef.current || !isHostRef.current) return
+if (!video) return
 
 broadcast({
   position: video.currentTime,
@@ -487,8 +525,54 @@ broadcast({
 }, [broadcast])
 
 const applyRemoteState = useCallback(async (remote: PlaybackState) => {
+if (applyingRemoteRef.current) return
+
+if (providerSourceRef.current === 'youtube') {
+  const adapter = providerAdapterRef.current
+  if (!adapter) {
+    pendingProviderStateRef.current = remote
+    stateRef.current = remote
+    setState(remote)
+    return
+  }
+
+  const current = await adapter.getState().catch(() => null)
+  if (!current) return
+
+  const target = Math.min(getAuthoritativePosition(remote), current.duration || Number.MAX_SAFE_INTEGER)
+  const drift = target - current.position
+
+  applyingRemoteRef.current = true
+
+  try {
+    if (shouldHardSeek(drift)) {
+      await adapter.seek(target)
+    } else if (Math.abs(drift) > 0.08) {
+      await adapter.seek(current.position + drift * 0.25)
+    }
+
+    if (Math.abs(current.playbackRate - remote.playbackRate) > 0.01) {
+      await adapter.setPlaybackRate(remote.playbackRate)
+    }
+
+    if (remote.isPlaying && !current.isPlaying) {
+      await adapter.play().catch(() => undefined)
+    }
+
+    if (!remote.isPlaying && current.isPlaying) {
+      await adapter.pause()
+    }
+  } finally {
+    applyingRemoteRef.current = false
+  }
+
+  stateRef.current = remote
+  setState(remote)
+  return
+}
+
 const video = videoRef.current
-if (!video || applyingRemoteRef.current) return
+if (!video) return
 
 const target = Math.min(getAuthoritativePosition(remote), duration || Number.MAX_SAFE_INTEGER)
 const drift = target - video.currentTime
@@ -523,6 +607,68 @@ setState(remote)
 
 useEffect(() => {
 let active = true
+
+if (!sessionId || providerSource !== 'youtube' || !youtubeContainerRef.current) return
+
+const adapter = createYouTubeAdapter(youtubeContainerRef.current)
+providerAdapterRef.current = adapter
+
+const unsubscribe = adapter.subscribe((current) => {
+  if (!active) return
+  setDuration(current.duration || 0)
+
+  if (!isHostRef.current || applyingRemoteRef.current) return
+
+  broadcast({
+    position: current.position,
+    isPlaying: current.isPlaying,
+    playbackRate: current.playbackRate,
+    updatedAt: Date.now(),
+    source: `youtube:${providerVideoIdRef.current}`,
+  }, true)
+})
+
+void adapter.mount(providerVideoId).then(async () => {
+  if (!active) return
+
+  const pending = pendingProviderStateRef.current
+  if (pending && !isHostRef.current) {
+    pendingProviderStateRef.current = null
+    await applyRemoteState(pending)
+    return
+  }
+
+  if (!supabase || !sessionId || isHostRef.current) return
+
+  const { data } = await supabase
+    .from('playback_state')
+    .select('is_playing, position, playback_rate, updated_at')
+    .eq('session_id', sessionId)
+    .maybeSingle()
+
+  if (!active || !data) return
+
+  await applyRemoteState({
+    position: data.position,
+    isPlaying: data.is_playing,
+    playbackRate: data.playback_rate,
+    updatedAt: Date.now(),
+    source: `youtube:${providerVideoIdRef.current}`,
+  })
+}).catch((error) => {
+  console.error('Could not mount YouTube provider:', error)
+})
+
+return () => {
+  active = false
+  unsubscribe()
+  providerAdapterRef.current = null
+  youtubeContainerRef.current?.replaceChildren()
+}
+}, [sessionId, providerSource, providerVideoId, broadcast, applyRemoteState])
+
+useEffect(() => {
+let active = true
 if (!sessionId) return
 
 void createSyncTransport(sessionId).then((transport) => {
@@ -545,8 +691,23 @@ return () => {
 
 useEffect(() => {
 const interval = window.setInterval(() => {
+if (applyingRemoteRef.current || !stateRef.current.isPlaying) return
+
+if (providerSourceRef.current === 'youtube') {
+  const adapter = providerAdapterRef.current
+  if (!adapter) return
+
+  void adapter.getState().then((current) => {
+    const next = { ...stateRef.current, position: current.position, playbackRate: current.playbackRate, updatedAt: Date.now() }
+    stateRef.current = next
+    setState(next)
+    if (isHostRef.current) void persistState(next)
+  }).catch(() => undefined)
+  return
+}
+
 const video = videoRef.current
-if (!video || applyingRemoteRef.current || !stateRef.current.isPlaying) return
+if (!video) return
 
 const next = { ...stateRef.current, position: video.currentTime, updatedAt: Date.now() }
 stateRef.current = next
@@ -560,22 +721,64 @@ return () => window.clearInterval(interval)
 
 const handlePlay = async () => {
 if (!isHostRef.current) return
+
+if (providerSourceRef.current === 'youtube') {
+  const adapter = providerAdapterRef.current
+  if (!adapter) return
+  await adapter.play().catch(() => undefined)
+  syncFromVideo(true, true)
+  return
+}
+
 const video = videoRef.current
 if (!video) return
 await video.play().catch(() => undefined)
 syncFromVideo(true, true)
 }
 
-const handlePause = () => {
+const handlePause = async () => {
 if (!isHostRef.current) return
+
+if (providerSourceRef.current === 'youtube') {
+  const adapter = providerAdapterRef.current
+  if (!adapter) return
+  await adapter.pause()
+  syncFromVideo(false, true)
+  return
+}
+
 const video = videoRef.current
 if (!video) return
 video.pause()
 syncFromVideo(false, true)
 }
 
-const handleSeek = (value: number) => {
+const handleSeek = async (value: number) => {
 if (!isHostRef.current) return
+
+if (providerSourceRef.current === 'youtube') {
+  const adapter = providerAdapterRef.current
+  if (!adapter) return
+  await adapter.seek(value)
+  const current = await adapter.getState().catch(() => null)
+  if (!current) return
+
+  const now = Date.now()
+  const next: PlaybackState = {
+    position: current.position,
+    isPlaying: current.isPlaying,
+    playbackRate: current.playbackRate,
+    updatedAt: now,
+    source: `youtube:${providerVideoIdRef.current}`,
+  }
+
+  stateRef.current = next
+  setState(next)
+  void transportRef.current?.send(next)
+  void persistState(next, true)
+  return
+}
+
 const video = videoRef.current
 if (!video) return
 
@@ -603,9 +806,16 @@ if (now - lastBroadcastRef.current >= 100) {
 
 const sendMessage = async () => {
 const text = message.trim()
-if (!text || !supabase || !sessionId || !currentUserIdRef.current) return
+if (!text || !supabase || !sessionId) return
 
-const userId = currentUserIdRef.current
+let userId = currentUserIdRef.current
+if (!userId) {
+  const { data: authData } = await supabase.auth.getUser()
+  userId = authData.user?.id || null
+  if (userId) currentUserIdRef.current = userId
+}
+
+if (!userId) return
 
 const { data, error } = await supabase
   .from('messages')
@@ -644,9 +854,16 @@ await chatChannelRef.current?.send({
 }
 
 const sendReaction = async (reaction: string) => {
-if (!supabase || !sessionId || !currentUserIdRef.current) return
+if (!supabase || !sessionId) return
 
-const userId = currentUserIdRef.current
+let userId = currentUserIdRef.current
+if (!userId) {
+  const { data: authData } = await supabase.auth.getUser()
+  userId = authData.user?.id || null
+  if (userId) currentUserIdRef.current = userId
+}
+
+if (!userId) return
 
 const { data, error } = await supabase
   .from('reactions')
@@ -695,5 +912,9 @@ window.setTimeout(() => setCopied(false), 1600)
 
 const displayedTime = state.isPlaying ? getAuthoritativePosition(state) : state.position
 
-return <div className="watch-room"> <header className="room-header"><button className="room-back" onClick={() => void leaveRoom()}><ArrowLeft size={18} /> <span>Leave room</span></button><div className="room-title"><span className="live-dot" /><strong>Interstellar — WatchSync Demo</strong><small>{transportMode === 'supabase' ? 'Realtime connected' : 'Local two-tab sync'}</small></div><button className="invite-button" onClick={() => void copyInvite()}><Copy size={16} /> {copied ? 'Copied' : inviteCode || 'Invite'}</button></header> <div className="room-layout"><section className="player-column"><div className="video-shell"><video ref={videoRef} src={DEMO_VIDEO} playsInline preload="metadata" onLoadedMetadata={() => setDuration(videoRef.current?.duration || 0)} onPlay={() => syncFromVideo(true, true)} onPause={() => syncFromVideo(false, true)} onRateChange={() => syncFromVideo(stateRef.current.isPlaying, true)} onSeeked={() => syncFromVideo(stateRef.current.isPlaying)} controls={false} /><div className="video-badge"><span className="live-dot" /> SYNCED</div><div className="video-time">{formatTime(displayedTime)}</div></div><div className="player-controls"><button className="play-control" onClick={() => state.isPlaying ? handlePause() : void handlePlay()} disabled={!isHost}>{state.isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}</button><input className="seekbar" type="range" min="0" max={duration || 1} step="0.1" value={Math.min(displayedTime, duration || 1)} onChange={(event) => handleSeek(Number(event.target.value))} disabled={!isHost} /><span className="time-label">{formatTime(displayedTime)} / {formatTime(duration)}</span></div><div className="reaction-bar"><span>React</span>{REACTIONS.map((reaction) => <button key={reaction} onClick={() => void sendReaction(reaction)} aria-label={`Send ${reaction}`}>{reaction}</button>)}</div><div className="floating-reactions">{reactions.map((item) => <span className="floating-reaction" key={item.id} style={{ left: `${item.left}%`, fontSize: `${item.size}px`, animationDuration: `${item.duration}s`, animationDelay: `${item.delay}s`, '--reaction-rotation': `${item.rotation}deg` } as CSSProperties}>{item.reaction}</span>)}</div><div className="room-status"><div><span className="status-pulse" /> {isHost ? 'You control playback' : 'Host controls playback'}</div><span>{participants.length} {participants.length === 1 ? 'person' : 'people'} watching</span></div></section><aside className="room-side"><div className="participants-panel"><div className="panel-heading"><strong><Users size={17} /> Watching now</strong><span>{participants.length}</span></div>{participants.map((participant) => <div className="participant" key={participant.id}><span className="avatar">{participant.avatar}</span><div><strong>{participant.id === currentPresenceKeyRef.current ? 'You' : participant.name}</strong><small>{participant.isHost ? 'Host' : participant.status}</small></div><i /></div>)}</div><div className="chat-panel"><div className="panel-heading"><strong><MessageCircle size={17} /> Live chat</strong><span>{messages.length}</span></div><div className="messages">{messages.map((item) => <div className="message" key={item.id}><strong>{item.name}</strong><span>{item.text}</span></div>)}</div><form className="chat-form" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}><input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Say something..." /><button aria-label="Send" type="submit"><Send size={16} /></button></form></div></aside></div><button className="room-close" onClick={() => void leaveRoom()}><X size={16} /> Close WatchSync</button></div>
+return <div className="watch-room"> <header className="room-header"><button className="room-back" onClick={() => void leaveRoom()}><ArrowLeft size={18} /> <span>Leave room</span></button><div className="room-title"><span className="live-dot" /><strong>{roomTitle}</strong><small>{transportMode === 'supabase' ? 'Realtime connected' : 'Local two-tab sync'}</small></div><button className="invite-button" onClick={() => void copyInvite()}><Copy size={16} /> {copied ? 'Copied' : inviteCode || 'Invite'}</button></header> <div className="room-layout"><section className="player-column"><div className="video-shell">{providerSource === 'youtube' ? (
+  <div ref={youtubeContainerRef} className="provider-player" />
+) : (
+  <video ref={videoRef} src={DEMO_VIDEO} playsInline preload="metadata" onLoadedMetadata={() => setDuration(videoRef.current?.duration || 0)} onPlay={() => syncFromVideo(true, true)} onPause={() => syncFromVideo(false, true)} onRateChange={() => syncFromVideo(stateRef.current.isPlaying, true)} onSeeked={() => syncFromVideo(stateRef.current.isPlaying)} controls={false} />
+)}<div className="video-badge"><span className="live-dot" /> SYNCED</div><div className="video-time">{formatTime(displayedTime)}</div></div><div className="player-controls"><button className="play-control" onClick={() => state.isPlaying ? handlePause() : void handlePlay()} disabled={!isHost}>{state.isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}</button><input className="seekbar" type="range" min="0" max={duration || 1} step="0.1" value={Math.min(displayedTime, duration || 1)} onChange={(event) => handleSeek(Number(event.target.value))} disabled={!isHost} /><span className="time-label">{formatTime(displayedTime)} / {formatTime(duration)}</span></div><div className="reaction-bar"><span>React</span>{REACTIONS.map((reaction) => <button key={reaction} onClick={() => void sendReaction(reaction)} aria-label={`Send ${reaction}`}>{reaction}</button>)}</div><div className="floating-reactions">{reactions.map((item) => <span className="floating-reaction" key={item.id} style={{ left: `${item.left}%`, fontSize: `${item.size}px`, animationDuration: `${item.duration}s`, animationDelay: `${item.delay}s`, '--reaction-rotation': `${item.rotation}deg` } as CSSProperties}>{item.reaction}</span>)}</div><div className="room-status"><div><span className="status-pulse" /> {isHost ? 'You control playback' : 'Host controls playback'}</div><span>{participants.length} {participants.length === 1 ? 'person' : 'people'} watching</span></div></section><aside className="room-side"><div className="participants-panel"><div className="panel-heading"><strong><Users size={17} /> Watching now</strong><span>{participants.length}</span></div>{participants.map((participant) => <div className="participant" key={participant.id}><span className="avatar">{participant.avatar}</span><div><strong>{participant.id === currentPresenceKeyRef.current ? 'You' : participant.name}</strong><small>{participant.isHost ? 'Host' : participant.status}</small></div><i /></div>)}</div><div className="chat-panel"><div className="panel-heading"><strong><MessageCircle size={17} /> Live chat</strong><span>{messages.length}</span></div><div className="messages">{messages.map((item) => <div className="message" key={item.id}><strong>{item.name}</strong><span>{item.text}</span></div>)}</div><form className="chat-form" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}><input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Say something..." /><button aria-label="Send" type="submit"><Send size={16} /></button></form></div></aside></div><button className="room-close" onClick={() => void leaveRoom()}><X size={16} /> Close WatchSync</button></div>
 }
