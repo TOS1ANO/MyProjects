@@ -348,7 +348,7 @@ function App() {
 
         const initials = displayName
           .split(' ')
-          .map((part) => part[0])
+          .map((part: string) => part[0])
           .join('')
           .slice(0, 2)
           .toUpperCase()
@@ -560,7 +560,7 @@ function App() {
       .subscribe()
 
     return () => {
-      void supabase.removeChannel(channel)
+      if (supabase) void supabase.removeChannel(channel)
     }
   }, [session?.user.id])
 
@@ -618,8 +618,11 @@ function App() {
       console.error('Could not load Discover viewer counts:', viewerCountsError)
     }
 
-    const viewerCounts = new Map(
-      (viewerCountsData || []).map((item) => [item.session_id, Number(item.viewer_count) || 0]),
+    const viewerCounts = new Map<string, number>(
+      (viewerCountsData || []).map((item: { session_id: string; viewer_count: number }) => [
+        item.session_id,
+        Number(item.viewer_count) || 0,
+      ]),
     )
 
     const nextDiscoverSessions: DiscoverSession[] = uniqueSessions.map((watchSession, index) => {
@@ -628,7 +631,7 @@ function App() {
       const hostUsername = profile?.username || ''
       const initials = hostName
         .split(' ')
-        .map((part) => part[0])
+        .map((part: string) => part[0])
         .join('')
         .slice(0, 2)
         .toUpperCase()

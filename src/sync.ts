@@ -22,7 +22,8 @@ export type SyncTransport = {
 
 export async function createSyncTransport(sessionId: string): Promise<SyncTransport> {
   if (supabase) {
-    const channel = supabase.channel(`watchsync:${sessionId}`, {
+    const client = supabase
+    const channel = client.channel(`watchsync:${sessionId}`, {
       config: {
         broadcast: { self: false },
       },
@@ -53,7 +54,7 @@ export async function createSyncTransport(sessionId: string): Promise<SyncTransp
         }
       },
       close: async () => {
-        await supabase.removeChannel(channel)
+        await client.removeChannel(channel)
       },
     }
   }

@@ -61,14 +61,16 @@ export function createYouTubeAdapter(
   const emitState = () => {
     if (!player || !window.YT) return
 
-    const playerState = player.getPlayerState()
+    const currentPlayer = player
+    const youtube = window.YT
+    const playerState = currentPlayer.getPlayerState()
 
     listeners.forEach((listener) =>
       listener({
-        position: player.getCurrentTime(),
-        isPlaying: playerState === window.YT.PlayerState.PLAYING,
-        playbackRate: player.getPlaybackRate(),
-        duration: player.getDuration(),
+        position: currentPlayer.getCurrentTime(),
+        isPlaying: playerState === youtube.PlayerState.PLAYING,
+        playbackRate: currentPlayer.getPlaybackRate(),
+        duration: currentPlayer.getDuration(),
       }),
     )
   }
@@ -135,13 +137,15 @@ export function createYouTubeAdapter(
         throw new Error('YouTube player is not ready.')
       }
 
-      const playerState = player.getPlayerState()
+      const currentPlayer = player
+      const youtube = window.YT
+      const playerState = currentPlayer.getPlayerState()
 
       return {
-        position: player.getCurrentTime(),
-        isPlaying: playerState === window.YT.PlayerState.PLAYING,
-        playbackRate: player.getPlaybackRate(),
-        duration: player.getDuration(),
+        position: currentPlayer.getCurrentTime(),
+        isPlaying: playerState === youtube.PlayerState.PLAYING,
+        playbackRate: currentPlayer.getPlaybackRate(),
+        duration: currentPlayer.getDuration(),
       }
     },
 
